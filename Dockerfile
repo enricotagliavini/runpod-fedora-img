@@ -1,0 +1,40 @@
+# Start with a clean Fedora base
+FROM docker://registry.fedoraproject.org/fedora-minimal:44
+
+# Prevent interactive prompts during build
+ENV TZ=Etc/UTC
+
+# Install base tools and compilation dependencies
+RUN dnf update -y && \
+    # dnf install dnf5-plugins -y && \
+    echo -e '\ninstall_weak_deps=False\n' >> /etc/dnf/dnf.conf && \
+    dnf install -y https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm && \
+    dnf install wget xorg-x11-drv-nvidia-cuda openssh-server -y && \
+    wget "https://developer.download.nvidia.com/compute/cuda/repos/fedora44/x86_64/cuda-fedora44.repo" -O /etc/yum.repos.d/cuda-fedora44.repo && \
+    dnf install createrepo_c htop bash vim less bc sudo libcublas13-cuda-13 cuda-compat-13-3 -y &&\
+    /usr/libexec/openssh/sshd-keygen ed25519
+    # dnf install -y cuda-toolkit \
+
+RUN mkdir /var/local/repo
+COPY id_rsa.pub /root/.ssh/authorized_keys
+COPY f44 /var/local/repo/f44
+RUN createrepo_c /var/local/repo/f44
+COPY local.repo /etc/yum.repos.d/
+RUN dnf install -y lemonade-server llama-cpp && dnf clean all
+# copy lemonade configuration files
+# COPY --chown=lemonade:lemonade lemonade /var/lib/lemonade
+
+COPY start_lemonade.sh /app/start_lemonade.sh
+COPY run.sh /app/run.sh
+RUN chmod +x /app/run.sh /app/start_lemonade.sh
+
+# Set up working directory
+WORKDIR /app
+# Expose ports for SSH (22)
+EXPOSE 22
+# if you want to expose multiple ports:
+#EXPOSE 22 12345
+
+CMD ["/app/run.sh"]
+
+
