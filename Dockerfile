@@ -13,7 +13,7 @@ RUN dnf update -y && \
     wget "https://developer.download.nvidia.com/compute/cuda/repos/fedora44/x86_64/cuda-fedora44.repo" -O /etc/yum.repos.d/cuda-fedora44.repo && \
     dnf install createrepo_c htop bash vim less bc sudo libcublas13-cuda-13 cuda-compat-13-3 -y && \
     /usr/libexec/openssh/sshd-keygen ed25519 && \
-    uv pip install huggingface_hub
+    uv pip install --system huggingface_hub
     # dnf install -y cuda-toolkit \
 
 COPY id_rsa.pub /root/.ssh/authorized_keys
