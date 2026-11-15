@@ -1,11 +1,41 @@
 #!/bin/bash
+set -euo pipefail
 
-podman run -d \
-  -p 2222:22 \
-  --rm \
-  -v ~/.ssh/id_rsa_ovh.pub:/root/.ssh/authorized_keys:ro,Z \
-  --name fedora-lemonade-test \
-  fedora-lemonade
+# Local debugging harness for the fedora-lemonade image.
+#
+# On any failure (set -e), the script exits here — before the final `trap - EXIT`
+# below — so this EXIT trap still runs: dump the container's logs, then remove it.
+# A clean run reaches that last line, disarms the trap, and exits silently.
+#
+#   podman logs fedora-lemonade-test
+#   ssh -p 2222 root@localhost   # -> cat /var/log/run.log /var/log/lemonade.log
+#
+# The podman invocation is written once (RUN_ARGS) and reused verbatim; only the
+# launch vs. cleanup differs.
+#
+# IMPORTANT: no --rm. Without it, the container keeps its tee'd
+# /var/log/run.log and /var/log/lemonade.log on disk after it stops or crashes,
+# so `podman logs` above still finds them instead of hitting an empty container.
 
-podman exec -it -u 0 fedora-lemonade-test /bin/bash -l
-podman kill fedora-lemonade-test
+NAME="fedora-lemonade-test"
+# Shared run flags; the `podman run ... fedora-lemonade` line is written once here.
+RUN_ARGS=(-d -p 2222:22 -v "$HOME/.ssh/id_rsa_ovh.pub":/root/.ssh/authorized_keys:ro,Z --name "$NAME")
+
+# Best-effort cleanup: never trips set -e, so the happy path stays silent even
+# if rm hiccups. Called by the happy path and, after logs, by the EXIT trap.
+cleanup() {
+    podman rm -f "$NAME" 2>/dev/null || true
+}
+
+trap 'podman logs "$NAME" 2>/dev/null || true; cleanup' EXIT
+
+# Launch in the background (no --rm), then drop into a login shell for interactive
+# debugging. run.sh stays up until its 8h safety net; Ctrl-C tears it down (and
+# the EXIT trap prints the logs it produced).
+podman run "${RUN_ARGS[@]}" fedora-lemonade
+podman exec -it -u 0 "$NAME" /bin/bash -l
+podman kill "$NAME"
+cleanup
+
+# Clean run: drop the trap so this final exit prints no logs.
+trap - EXIT

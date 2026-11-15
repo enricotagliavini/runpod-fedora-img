@@ -1,6 +1,8 @@
 #!/bin/bash
 
-exec >> /var/log/lemonade.log 2>&1
+# Same as run.sh: persist to the file AND forward live to the container's
+# stdout/stderr so `podman logs` and attached runs capture the server output too.
+exec > >(tee -a /var/log/lemonade.log) 2>&1
 
 # Download the GGUF checkpoints into the extra_models_dir folder BEFORE lemond starts, so
 # the pre-pulled model is on disk the moment Lemonade scans the directory at startup.

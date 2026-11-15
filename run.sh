@@ -2,7 +2,10 @@
 
 set -euo pipefail
 
-exec >> /var/log/run.log 2>&1
+# Tee combined output to the log file AND the container's stdout/stderr.
+# The file keeps the persistent debug log (tailable over SSH); the fd pass-through
+# lets `podman logs` and attached runs show the same output live.
+exec > >(tee -a /var/log/run.log) 2>&1
 
 # Detect GPU and get vRAM information
 get_gpu_vram() {
@@ -43,15 +46,12 @@ echo "Detected GPU with ${VRAM_GB} GB VRAM"
 /usr/bin/sshd -D &
 
 mkdir -p /var/cache/huggingface /var/cache/lemonade/huggingface /root/.config/htop
-chown lemonade:lemonade /var/cache/huggingface /var/cache/lemonade/huggingface
+touch /var/log/lemonade.log
+chown lemonade:lemonade /var/cache/huggingface /var/cache/lemonade /var/log/lemonade.log /var/cache/lemonade/huggingface
 
 # start lemonade here. start_lemonade.sh downloads the pre-pulled GGUF checkpoints into
-# /var/cache/huggingface (the extra_models_dir) and only THEN execs lemond, so the model is
+# /var/cache/lemonade/huggingface (the extra_models_dir) and only THEN execs lemond, so the model is
 # on disk before the server scans it at startup.
-mkdir /var/cache/lemonade
-touch /var/log/lemonade.log
-chown lemonade:lemonade /var/cache/lemonade /var/log/lemonade.log
-
 if [[ "$VRAM_GB" -le 30 ]]; then
     # 24GB tier: skip the mmproj to save VRAM on a smaller GPU (main checkpoint only).
     sudo -u lemonade /app/start_lemonade.sh &
