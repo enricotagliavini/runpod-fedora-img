@@ -78,12 +78,7 @@ else
     lemonade load Qwen3.8-27B-GGUF-UD-Q5_K_S --llamacpp-args='--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2' --ctx-size 250000 --save-options
 fi
 
-# otherwise uncomment the following
-# pkill lemond
-# sleep 5
-# pkill -9 lemond
-# sudo -u lemonade -- llama-server -m /var/cache/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q5_K_S.gguf --ctx-size 100000 --port 8001 --jinja --metrics --mmproj /var/cache/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/mmproj-BF16.gguf --cache-type-k q8_0 --cache-type-v q8_0 --flash-attn on --spec-type draft-mtp --parallel 1 &> /var/log/llama-server.log &
-# safety net, don't let the container run for more than 12 hours
+# safety net, don't let the container run indefinitely. If forgetten it should just stop and not drain funding for nothing
 sleep 8h
 
 kill %1 %2
