@@ -42,8 +42,8 @@ echo "Detected GPU with ${VRAM_GB} GB VRAM"
 
 /usr/bin/sshd -D &
 
-mkdir -p /var/cache/huggingface /root/.config/htop
-chown lemonade:lemonade /var/cache/huggingface
+mkdir -p /var/cache/huggingface /var/cache/lemonade/huggingface /root/.config/htop
+chown lemonade:lemonade /var/cache/huggingface /var/cache/lemonade/huggingface
 
 # start lemonade here
 mkdir /var/cache/lemonade

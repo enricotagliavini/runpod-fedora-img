@@ -8,7 +8,7 @@ function run_lemonade() {
     export RUNTIME_DIRECTORY=/run/lemonade
     export STATE_DIRECTORY=/var/lib/lemonade
     export CACHE_DIRECTORY=/var/cache/lemonade
-    export HF_HOME=/var/cache/huggingface
+    export HF_HOME=/var/cache/lemonade/huggingface
 
     exec /usr/bin/lemond
 }
