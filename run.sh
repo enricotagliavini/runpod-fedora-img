@@ -45,36 +45,52 @@ echo "Detected GPU with ${VRAM_GB} GB VRAM"
 mkdir -p /var/cache/huggingface /var/cache/lemonade/huggingface /root/.config/htop
 chown lemonade:lemonade /var/cache/huggingface /var/cache/lemonade/huggingface
 
-# start lemonade here
+# start lemonade here. start_lemonade.sh downloads the pre-pulled GGUF checkpoints into
+# /var/cache/huggingface (the extra_models_dir) and only THEN execs lemond, so the model is
+# on disk before the server scans it at startup.
 mkdir /var/cache/lemonade
 touch /var/log/lemonade.log
 chown lemonade:lemonade /var/cache/lemonade /var/log/lemonade.log
-sudo -u lemonade /app/start_lemonade.sh &
+
+if [[ "$VRAM_GB" -le 30 ]]; then
+    # 24GB tier: skip the mmproj to save VRAM on a smaller GPU (main checkpoint only).
+    sudo -u lemonade /app/start_lemonade.sh &
+else
+    # More than 30GB: also fetch the mmproj for the `vision` label — room to spare.
+    sudo -u lemonade /app/start_lemonade.sh --mmproj &
+fi
+
+# Wait for the server to come up (start_lemonade.sh downloads first, then execs lemond).
+echo "Waiting for Lemonade server to become ready (up to 15 minutes)..."
+for _ in $(seq 1 900); do
+    lemonade status >/dev/null 2>&1 && { echo "Lemonade server is ready"; break; }
+    sleep 1
+done
+if ! lemonade status >/dev/null 2>&1; then
+    echo "ERROR: Lemonade server did not start within 15 minutes; tearing down."
+    kill %1 2>/dev/null || true
+    exit 1
+fi
+
+# Point the running server at the pre-downloaded models (picked up immediately, no restart).
+lemonade config set extra_models_dir=/var/cache/huggingface
+
 lemonade config set llamacpp.cuda_bin=/usr/bin/llama-server
 lemonade config set llamacpp.backend=cuda || lemonade config set llamacpp.backend=system
 lemonade config set llamacpp.args="--flash-attn on"
 lemonade config set llamacpp.cpu_bin=/usr/bin/llama-server
 
 # MTP doesn't work well with nvidia and llama-cpp. Performance is bad, let's not use it
-# lemonade pull unsloth/Qwen3.8-27B-GGUF:UD-Q5_K_S
 
 if [[ "$VRAM_GB" -le 30 ]]; then
     # 24GB or less (or no GPU)
     echo "Using 24GB GPU profile"
-    lemonade pull user.Qwen3.8-27B-GGUF-UD-Q5_K_S \
-      --source huggingface \
-      --checkpoint main unsloth/Qwen3.8-27B-GGUF:UD-Q5_K_S \
-      --checkpoint mmproj unsloth/Qwen3.8-27B-GGUF:mmproj-BF16.gguf \
-      --recipe llamacpp \
-      --label chat \
-      --label vision
-
-    # with this you run directly using lemonade
+    # GGUFs were pre-pulled into extra_models_dir by start_lemonade.sh (scanned at startup); load for serving
     lemonade load Qwen3.8-27B-GGUF-UD-Q5_K_S --llamacpp-args='--cache-type-k q8_0 --cache-type-v q8_0 --spec-type none' --ctx-size 110000 --save-options
 else
     # More than 30GB
     echo "Using 30GB+ GPU profile"
-    lemonade pull unsloth/Qwen3.8-27B-GGUF:UD-Q5_K_S
+    # GGUFs were pre-pulled into extra_models_dir by start_lemonade.sh (scanned at startup); load for serving
     lemonade load Qwen3.8-27B-GGUF-UD-Q5_K_S --llamacpp-args='--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2' --ctx-size 250000 --save-options
 fi
 
