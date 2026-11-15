@@ -15,14 +15,9 @@ RUN dnf update -y && \
     /usr/libexec/openssh/sshd-keygen ed25519
     # dnf install -y cuda-toolkit \
 
-RUN mkdir /var/local/repo
 COPY id_rsa.pub /root/.ssh/authorized_keys
-COPY f44 /var/local/repo/f44
-RUN createrepo_c /var/local/repo/f44
-COPY local.repo /etc/yum.repos.d/
-RUN dnf install -y lemonade-server llama-cpp && dnf clean all
-# copy lemonade configuration files
-# COPY --chown=lemonade:lemonade lemonade /var/lib/lemonade
+RUN wget -O /etc/yum.repos.d/ai-custom-infra.repo https://enricotagliavini.github.io/repositories/ai-custom-infra/ai-custom-infra.repo && \
+    dnf install -y lemonade-server llama-cpp && dnf clean all
 
 COPY start_lemonade.sh /app/start_lemonade.sh
 COPY run.sh /app/run.sh
