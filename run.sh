@@ -80,17 +80,11 @@ lemonade config set llamacpp.backend=cuda || lemonade config set llamacpp.backen
 lemonade config set llamacpp.args="--flash-attn on"
 lemonade config set llamacpp.cpu_bin=/usr/bin/llama-server
 
-# MTP doesn't work well with nvidia and llama-cpp. Performance is bad, let's not use it
-
 if [[ "$VRAM_GB" -le 30 ]]; then
-    # 24GB or less (or no GPU)
     echo "Using 24GB GPU profile"
-    # GGUFs were pre-pulled into extra_models_dir by start_lemonade.sh (scanned at startup); load for serving
     lemonade load Qwen3.8-27B-GGUF-UD-Q5_K_S --llamacpp-args='--cache-type-k q8_0 --cache-type-v q8_0 --spec-type none' --ctx-size 110000 --save-options
 else
-    # More than 30GB
     echo "Using 30GB+ GPU profile"
-    # GGUFs were pre-pulled into extra_models_dir by start_lemonade.sh (scanned at startup); load for serving
     lemonade load Qwen3.8-27B-GGUF-UD-Q5_K_S --llamacpp-args='--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2' --ctx-size 250000 --save-options
 fi
 
