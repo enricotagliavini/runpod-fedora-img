@@ -65,6 +65,11 @@ declare -A MODEL_LLAMACPP_ARGS=(
     ["ornith|large"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2"
 )
 
+# --llamacpp-args applied to EVERY model/tier (the "common" profile: KV cache
+# reuse, batching, and cache RAM). cmd_load always prepends this to the
+# per-model/per-tier entry, so a newly registered model inherits it too.
+COMMON_LLAMACPP_ARGS="--cache-reuse 512 --batch-size 4096 --ubatch-size 2048 --cache-ram 20000"
+
 # "slug|tier" -> --ctx-size value for `lemonade load`
 # (ornith is flat 128000 in both tiers: it only ever runs on 30GB+ GPUs)
 declare -A MODEL_CTX_SIZE=(
@@ -139,7 +144,7 @@ cmd_models() {
         echo "    local dir:    $HF_MODELS_DIR/${MODEL_DIR[$m]}"
         for t in small large; do
             key="$m|$t"
-            echo "    load ($t):    --llamacpp-args='${MODEL_LLAMACPP_ARGS[$key]}' --ctx-size ${MODEL_CTX_SIZE[$key]}"
+            echo "    load ($t):    --llamacpp-args='${COMMON_LLAMACPP_ARGS} ${MODEL_LLAMACPP_ARGS[$key]}' --ctx-size ${MODEL_CTX_SIZE[$key]}"
         done
     done
 }
@@ -312,12 +317,15 @@ cmd_load() {
         exit 1
     fi
 
-    local tier key
+    local tier key load_args
     tier=$(tier_for_vram "$vram")
     key="$model|$tier"
+    # Common profile (KV cache reuse / batching / cache RAM) is shared by every
+    # model and tier; the per-model/per-tier entry only supplies what differs.
+    load_args="${COMMON_LLAMACPP_ARGS} ${MODEL_LLAMACPP_ARGS[$key]}"
     echo "[load] $model (dir: ${MODEL_DIR[$model]}) with $tier profile for ${vram}GB VRAM"
     lemonade load "${MODEL_DIR[$model]}" \
-        --llamacpp-args="${MODEL_LLAMACPP_ARGS[$key]}" \
+        --llamacpp-args="${load_args}" \
         --ctx-size "${MODEL_CTX_SIZE[$key]}" \
         --save-options
 }
