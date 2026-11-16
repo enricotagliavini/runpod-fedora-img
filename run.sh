@@ -64,7 +64,24 @@ if [[ "$VRAM_GB" -gt 30 ]]; then
     # (24GB tier: skip the mmproj to save VRAM on a smaller GPU, main checkpoint only.)
     MMPROJ_FLAG=(--mmproj)
 fi
-sudo -u lemonade /app/lemonadectl download "$MODEL" "${MMPROJ_FLAG[@]}"
+# Optional hf auth: the token reaches run.sh as the HF_TOKEN env var (podman
+# secret in the test harness, RunPod secret in production). It is bridged to
+# lemonadectl as a file path so it never appears on a command line (sudo's
+# env_reset strips the env var anyway, and argv is visible via ps for the whole
+# download). The 0600 file lives only for the download's duration (if the
+# download fails, run.sh exits and the container's /run tmpfs goes with it).
+HF_TOKEN_ARGS=()
+HF_TOKEN_TMP=""
+if [[ -n "${HF_TOKEN:-}" ]]; then
+    HF_TOKEN_TMP=/run/hf_token
+    (umask 077 && printf '%s' "${HF_TOKEN//[$'\n\r']/}" > "$HF_TOKEN_TMP")
+    chown lemonade:lemonade "$HF_TOKEN_TMP"
+    HF_TOKEN_ARGS=(--hf-token-file "$HF_TOKEN_TMP")
+fi
+sudo -u lemonade /app/lemonadectl download "$MODEL" "${MMPROJ_FLAG[@]}" "${HF_TOKEN_ARGS[@]}"
+if [[ -n "$HF_TOKEN_TMP" ]]; then
+    rm -f "$HF_TOKEN_TMP"
+fi
 sudo -u lemonade /app/lemonadectl start &
 
 # Wait for the server to come up (lemond only starts after the download finished).

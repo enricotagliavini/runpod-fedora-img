@@ -81,9 +81,13 @@ lemonadectl - control the lemonade (lemond) inference service
 
 Usage:
   lemonadectl models
-  lemonadectl download <model> [--mmproj]
+  lemonadectl download <model> [--mmproj] [--hf-token-file PATH]
   lemonadectl start
   lemonadectl load <model> --vram <GB>
+
+--hf-token-file PATH reads a HuggingFace token from the file (line breaks
+trimmed) and authenticates the hf download; an HF_TOKEN env var is used when
+the option is absent.
 
 Run 'lemonadectl models' to list the registered models.
 EOF
@@ -138,18 +142,32 @@ cmd_models() {
 }
 
 cmd_download() {
-    local model="${1:-}"
-    if [[ $# -gt 0 ]]; then
-        shift
-    fi
-    local with_mmproj=0
-    local opt
-    for opt in "$@"; do
-        case "$opt" in
-            --mmproj) with_mmproj=1 ;;
-            *)
-                echo "ERROR: unknown option for download: $opt" >&2
+    local model="" hf_token_file="" with_mmproj=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --mmproj)
+                with_mmproj=1
+                shift
+                ;;
+            --hf-token-file)
+                if [[ $# -lt 2 ]]; then
+                    echo "ERROR: --hf-token-file requires a value" >&2
+                    exit 1
+                fi
+                hf_token_file="$2"
+                shift 2
+                ;;
+            -*)
+                echo "ERROR: unknown option for download: $1" >&2
                 usage
+                ;;
+            *)
+                if [[ -n "$model" ]]; then
+                    echo "ERROR: unexpected argument for download: $1" >&2
+                    usage
+                fi
+                model="$1"
+                shift
                 ;;
         esac
     done
@@ -159,6 +177,23 @@ cmd_download() {
         echo "[download] ERROR: 'hf' CLI not found, cannot download $model" >&2
         exit 1
     }
+
+    # hf auth: --hf-token-file (a 0400/0600 file, e.g. a podman secret chowned
+    # to this user by run.sh) wins over an already-provided HF_TOKEN env var
+    # (e.g. set directly for local runs). The token only ever reaches hf's
+    # environment — it is not printed and not put on any command line.
+    if [[ -n "$hf_token_file" ]]; then
+        if [[ ! -r "$hf_token_file" ]]; then
+            echo "[download] ERROR: cannot read HF token file: $hf_token_file" >&2
+            exit 1
+        fi
+        export HF_TOKEN="$(tr -d '\r\n' < "$hf_token_file")"
+    fi
+    if [[ -n "${HF_TOKEN:-}" ]]; then
+        echo "[download] hf will run authenticated (HF_TOKEN set)"
+    else
+        echo "[download] hf will run anonymously (no HF_TOKEN)"
+    fi
 
     local repo="${MODEL_HF_REPO[$model]}"
     local dir="$HF_MODELS_DIR/${MODEL_DIR[$model]}"

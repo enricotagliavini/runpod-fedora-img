@@ -29,8 +29,10 @@ OCI image on RunPod GPU pod -> podman run fedora-lemonade
         |     2. MODEL=${LEMONADE_MODEL:-qwen3-27b}          (registry lives in lemonadectl)
         |     3. /usr/bin/sshd -D &                          (SSH on :22, keys from id_rsa.pub)
         |     4. mkdir + chown lemonade:lemonade of cache/state dirs
-        |     5. lemonadectl download $MODEL [--mmproj]      (as `lemonade` user, FOREGROUND;
-        |        run.sh blocks until the model is on disk; --mmproj only when VRAM>30GB)
+        |     5. lemonadectl download $MODEL [--mmproj] [--hf-token-file PATH]
+        |        (as `lemonade` user, FOREGROUND; run.sh blocks until the model
+        |        is on disk; --mmproj only when VRAM>30GB; HF_TOKEN env var is
+        |        bridged to a 0600 /run/hf_token for the download's duration)
         |     6. lemonadectl start &                         (as `lemonade` user, backgrounded)
         |     7. wait for `lemonade status`, then `lemonade config set` x5
         |        (extra_models_dir + llamacpp cuda/cpu bin, backend, args)
@@ -54,6 +56,8 @@ OCI image on RunPod GPU pod -> podman run fedora-lemonade
 - Labels are a taxonomy: `coding, embeddings, hot, mtp, reasoning, reranking, tool-calling, vision`.
 
 **Model selection:** one model per container instance, picked at boot via the `LEMONADE_MODEL` env var (default `qwen3-27b`). Registered models, their HF repos, checkpoint/mmproj file names, and per-VRAM-tier load args live in the `lemonadectl` registry — adding a model is a matter of adding a few entries there.
+
+**hf auth (downloads):** the token reaches `run.sh` as the `HF_TOKEN` env var in both environments (podman `--secret hf_token,type=env,target=HF_TOKEN` in the test harness, RunPod template secret in production). `run.sh` bridges it to a 0600 `/run/hf_token` for the download's duration and passes `--hf-token-file` to `lemonadectl download` — the token never lands on a command line (sudo strips the env var, and argv is visible via `ps`).
 
 **Observed behaviors / gotchas:**
 - `MTP` (draft/speculative decoding) is **disabled** with a comment: *"MTP doesn't work well with nvidia and llama-cpp. Performance is bad, let's not use it."*
@@ -83,7 +87,7 @@ All scripts use `set -euo pipefail`. `bash` only.
 |------|---------|
 | Build image | `bash build.sh` → `podman build -t fedora-lemonade .` |
 | Push to GHCR | `bash push-to-ghcr.sh` (tags `localhost/fedora-lemonade:latest` → `ghcr.io/enricotagliavini/fedora-lemonade:latest`) |
-| Test image locally | `bash test-podman-locally.sh` (runs detached, maps `2222:22`, mounts `~/.ssh/id_rsa_ovh.pub`, execs as root) |
+| Test image locally | `bash test-podman-locally.sh` (runs detached, maps `2222:22`, mounts `~/.ssh/id_rsa_ovh.pub`, injects `hf_token` secret as the `HF_TOKEN` env var, execs as root) |
 | Run on RunPod | build/push the OCI image, then run it on a GPU pod |
 
 **Diagnosing a container:** inspect `/var/log/run.log` (bootstrap/VRAM) and `/var/log/lemonade.log` (server). Verify GPU: `nvidia-smi` present + host driver major >= 580 for CUDA 13.
@@ -105,7 +109,7 @@ All scripts use `set -euo pipefail`. `bash` only.
 |------|------|
 | `Dockerfile` | Fedora 44 base; installs NVIDIA CUDA libs (`libcublas13-cuda-13`, `cuda-compat-13-3`, `xorg-x11-drv-nvidia-cuda`), `openssh-server`, `lemonade-server` + `llama-cpp` from the `ai-custom-infra` custom RPM repo; exposes :22; CMD `/app/run.sh` |
 | `run.sh` | Entrypoint: VRAM detect, model selection (`LEMONADE_MODEL`), sshd, cache setup, `lemonadectl download` (foreground) → `lemonadectl start &`, lemonade `config set`, `lemonadectl load`, safety net |
-| `lemonadectl` | Model registry + CLI: `models`, `download <model> [--mmproj]`, `start` (CUDA-13 driver/compat gate → `exec lemond`), `load <model> --vram <GB>` |
+| `lemonadectl` | Model registry + CLI: `models`, `download <model> [--mmproj] [--hf-token-file PATH]`, `start` (CUDA-13 driver/compat gate → `exec lemond`), `load <model> --vram <GB>` |
 | `build.sh` | One-line `podman build` |
 | `push-to-ghcr.sh` | Tag+push to GHCR (`-x` verbose) |
 | `test-podman-locally.sh` | Local detached run w/ SSH + key mount |
@@ -121,6 +125,6 @@ All scripts use `set -euo pipefail`. `bash` only.
 ## Testing & QA
 
 - **No unit/integration test framework** for the shell logic. QA is done by running the image.
-- **`test-podman-locally.sh`:** spins the image detached, maps SSH `2222:22`, mounts `~/.ssh/id_rsa_ovh.pub`, opens a root shell, then cleans up. Use it to sanity-check that the image boots and the model loads.
+- **`test-podman-locally.sh`:** spins the image detached, maps SSH `2222:22`, mounts `~/.ssh/id_rsa_ovh.pub`, injects the `hf_token` podman secret as the `HF_TOKEN` env var (hf auth; `run.sh` bridges it to a 0600 file for `lemonadectl download`), opens a root shell, then cleans up. Use it to sanity-check that the image boots and the model loads.
 - **`mock/nvidia-smi`:** lets you test `get_gpu_vram`/driver paths without an NVIDIA GPU. It caches output to `/tmp/nvidia-smi.mock` (+ `.mb` for the raw MB value) on first run and dispatches the `--query-gpu=...`/`--format=csv` flags used by `run.sh`.
 - **Coverage expectation:** informal (smoke-run the container); there is no test suite to extend.
