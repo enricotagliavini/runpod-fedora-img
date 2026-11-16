@@ -20,9 +20,9 @@ COPY id_rsa.pub /root/.ssh/authorized_keys
 RUN wget -O /etc/yum.repos.d/ai-custom-infra.repo https://enricotagliavini.github.io/repositories/ai-custom-infra/ai-custom-infra.repo && \
     dnf install -y lemonade-server llama-cpp && dnf clean all
 
-COPY start_lemonade.sh /app/start_lemonade.sh
+COPY lemonadectl /app/lemonadectl
 COPY run.sh /app/run.sh
-RUN chmod +x /app/run.sh /app/start_lemonade.sh
+RUN chmod +x /app/run.sh /app/lemonadectl
 
 # Set up working directory
 WORKDIR /app

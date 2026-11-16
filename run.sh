@@ -43,24 +43,31 @@ get_gpu_vram() {
 VRAM_GB=$(get_gpu_vram)
 echo "Detected GPU with ${VRAM_GB} GB VRAM"
 
+# Which network to download/load: picked via the LEMONADE_MODEL env var.
+# The default keeps the previous single-model behavior; `lemonadectl models`
+# lists the registry.
+MODEL="${LEMONADE_MODEL:-qwen3-27b}"
+
 /usr/bin/sshd -D &
 
 mkdir -p /var/cache/huggingface /var/cache/lemonade/huggingface /root/.config/htop
 touch /var/log/lemonade.log
 chown lemonade:lemonade /var/cache/huggingface /var/cache/lemonade /var/log/lemonade.log /var/cache/lemonade/huggingface
 
-# start lemonade here. start_lemonade.sh downloads the pre-pulled GGUF checkpoints into
-# /var/cache/lemonade/huggingface (the extra_models_dir) and only THEN execs lemond, so the model is
-# on disk before the server scans it at startup.
-if [[ "$VRAM_GB" -le 30 ]]; then
-    # 24GB tier: skip the mmproj to save VRAM on a smaller GPU (main checkpoint only).
-    sudo -u lemonade /app/start_lemonade.sh &
-else
+# start lemonade here. lemonadectl first downloads the selected model's GGUF
+# checkpoints into the extra_models_dir in the foreground (this blocks until the
+# model is on disk), and only THEN starts lemond in the background, so the model
+# is present before the server scans the directory at startup.
+MMPROJ_FLAG=()
+if [[ "$VRAM_GB" -gt 30 ]]; then
     # More than 30GB: also fetch the mmproj for the `vision` label — room to spare.
-    sudo -u lemonade /app/start_lemonade.sh --mmproj &
+    # (24GB tier: skip the mmproj to save VRAM on a smaller GPU, main checkpoint only.)
+    MMPROJ_FLAG=(--mmproj)
 fi
+sudo -u lemonade /app/lemonadectl download "$MODEL" "${MMPROJ_FLAG[@]}"
+sudo -u lemonade /app/lemonadectl start &
 
-# Wait for the server to come up (start_lemonade.sh downloads first, then execs lemond).
+# Wait for the server to come up (lemond only starts after the download finished).
 echo "Waiting for Lemonade server to become ready (up to 15 minutes)..."
 for _ in $(seq 1 900); do
     lemonade status >/dev/null 2>&1 && { echo "Lemonade server is ready"; break; }
@@ -80,13 +87,9 @@ lemonade config set llamacpp.backend=cuda || lemonade config set llamacpp.backen
 lemonade config set llamacpp.args="--flash-attn on"
 lemonade config set llamacpp.cpu_bin=/usr/bin/llama-server
 
-if [[ "$VRAM_GB" -le 30 ]]; then
-    echo "Using 24GB GPU profile"
-    lemonade load Qwen3.8-27B-GGUF-UD-Q5_K_S --llamacpp-args='--cache-type-k q8_0 --cache-type-v q8_0 --spec-type none' --ctx-size 110000 --save-options
-else
-    echo "Using 30GB+ GPU profile"
-    lemonade load Qwen3.8-27B-GGUF-UD-Q5_K_S --llamacpp-args='--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2' --ctx-size 250000 --save-options
-fi
+# Load the selected model: per-model llama.cpp args and ctx-size come from the
+# lemonadectl registry, profiled by the detected VRAM tier.
+/app/lemonadectl load "$MODEL" --vram "$VRAM_GB"
 
 # safety net, don't let the container run indefinitely. If forgetten it should just stop and not drain funding for nothing
 sleep 8h
