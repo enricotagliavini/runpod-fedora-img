@@ -26,7 +26,8 @@ OCI image on RunPod GPU pod -> podman run fedora-lemonade
         |
         +-- run.sh (entrypoint, WORKDIR /app, logs -> /var/log/run.log)
         |     1. get_gpu_vram(): nvidia-smi --query-gpu=count/memory.total -> VRAM_GB
-        |     2. MODEL=${LEMONADE_MODEL:-qwen3-27b}          (registry lives in lemonadectl)
+        |     2. model selection: MODEL env (qwen|ornith)    (registry lives in lemonadectl)
+        |        default: ornith at VRAM>=30GB, else qwen; invalid MODEL -> warn + default
         |     3. /usr/bin/sshd -D &                          (SSH on :22, keys from id_rsa.pub)
         |     4. mkdir + chown lemonade:lemonade of cache/state dirs
         |     5. lemonadectl download $MODEL [--mmproj] [--hf-token-file PATH]
@@ -37,7 +38,7 @@ OCI image on RunPod GPU pod -> podman run fedora-lemonade
         |     7. wait for `lemonade status`, then `lemonade config set` x5
         |        (extra_models_dir + llamacpp cuda/cpu bin, backend, args)
         |     8. lemonadectl load $MODEL --vram $VRAM_GB     (per-model args/ctx from registry:
-        |        <=30GB small profile ctx 110k / >30GB large profile ctx 250k)
+        |        small tier = VRAM<=30GB; qwen ctx 110k/128k, ornith ctx 128k)
         |     9. safety net: sleep 8h; kill %1 %2; sleep 20; kill -9
         |
         +-- lemonadectl start (backgrounded; model-agnostic — the server just scans
@@ -55,7 +56,7 @@ OCI image on RunPod GPU pod -> podman run fedora-lemonade
 - Checkpoints are downloaded by `lemonadectl download <model>` (hf CLI into `extra_models_dir` = `/var/cache/huggingface`, the dir lemond scans). `lemonade load NAME --llamacpp-args '...' --ctx-size N --save-options` (run via `lemonadectl load <model> --vram <GB>`) loads into the backend for serving; NAME is the model's local dir name.
 - Labels are a taxonomy: `coding, embeddings, hot, mtp, reasoning, reranking, tool-calling, vision`.
 
-**Model selection:** one model per container instance, picked at boot via the `LEMONADE_MODEL` env var (default `qwen3-27b`). Registered models, their HF repos, checkpoint/mmproj file names, and per-VRAM-tier load args live in the `lemonadectl` registry — adding a model is a matter of adding a few entries there.
+**Model selection:** one model per container instance, picked at boot by the `MODEL` env var (`qwen` or `ornith`; any other value logs a warning and falls back to the default). When `MODEL` is unset the default is VRAM-based: `ornith` (25.3 GB Q5_K_M, needs a 30GB+ GPU) at VRAM >= 30GB, `qwen` below that. An explicit `MODEL=ornith` on a smaller GPU is honored with a warning. Registered models, their HF repos, checkpoint/mmproj file names, and per-VRAM-tier load args live in the `lemonadectl` registry — adding a model is a matter of adding a few entries there.
 
 **hf auth (downloads):** the token reaches `run.sh` as the `HF_TOKEN` env var in both environments (podman `--secret hf_token,type=env,target=HF_TOKEN` in the test harness, RunPod template secret in production). `run.sh` bridges it to a 0600 `/run/hf_token` for the download's duration and passes `--hf-token-file` to `lemonadectl download` — the token never lands on a command line (sudo strips the env var, and argv is visible via `ps`).
 
@@ -63,7 +64,7 @@ OCI image on RunPod GPU pod -> podman run fedora-lemonade
 - `MTP` (draft/speculative decoding) is **disabled** with a comment: *"MTP doesn't work well with nvidia and llama-cpp. Performance is bad, let's not use it."*
 - CUDA-13 backend requires NVIDIA driver major version **>= 580**; otherwise the `cuda-13*/compat` shim is needed on `LD_LIBRARY_PATH`.
 - The `get_gpu_vram()` fallback heuristic table (by GPU name) is commented out — detection now trusts `nvidia-smi`'s reported `memory.total`.
-- VRAM split: `<=30GB` → small profile, `--ctx-size 110000`; `>30GB` → large profile, `--ctx-size 250000` (profiles defined per model in the lemonadectl registry).
+- VRAM split: `<=30GB` → small profile, `>30GB` → large profile (per-model in the lemonadectl registry). Context sizes: qwen 110000 (small) / 128000 (large); ornith 128000 in both tiers.
 
 ## Key Directories
 
@@ -108,7 +109,7 @@ All scripts use `set -euo pipefail`. `bash` only.
 | File | Role |
 |------|------|
 | `Dockerfile` | Fedora 44 base; installs NVIDIA CUDA libs (`libcublas13-cuda-13`, `cuda-compat-13-3`, `xorg-x11-drv-nvidia-cuda`), `openssh-server`, `lemonade-server` + `llama-cpp` from the `ai-custom-infra` custom RPM repo; exposes :22; CMD `/app/run.sh` |
-| `run.sh` | Entrypoint: VRAM detect, model selection (`LEMONADE_MODEL`), sshd, cache setup, `lemonadectl download` (foreground) → `lemonadectl start &`, lemonade `config set`, `lemonadectl load`, safety net |
+| `run.sh` | Entrypoint: VRAM detect, model selection (`MODEL` env, VRAM-based default), sshd, cache setup, `lemonadectl download` (foreground) → `lemonadectl start &`, lemonade `config set`, `lemonadectl load`, safety net |
 | `lemonadectl` | Model registry + CLI: `models`, `download <model> [--mmproj] [--hf-token-file PATH]`, `start` (CUDA-13 driver/compat gate → `exec lemond`), `load <model> --vram <GB>` |
 | `build.sh` | One-line `podman build` |
 | `push-to-ghcr.sh` | Tag+push to GHCR (`-x` verbose) |
@@ -125,6 +126,6 @@ All scripts use `set -euo pipefail`. `bash` only.
 ## Testing & QA
 
 - **No unit/integration test framework** for the shell logic. QA is done by running the image.
-- **`test-podman-locally.sh`:** spins the image detached, maps SSH `2222:22`, mounts `~/.ssh/id_rsa_ovh.pub`, injects the `hf_token` podman secret as the `HF_TOKEN` env var (hf auth; `run.sh` bridges it to a 0600 file for `lemonadectl download`), opens a root shell, then cleans up. Use it to sanity-check that the image boots and the model loads.
+- **`test-podman-locally.sh`:** spins the image detached, maps SSH `2222:22`, mounts `~/.ssh/id_rsa_ovh.pub`, injects the `hf_token` podman secret as the `HF_TOKEN` env var (hf auth; `run.sh` bridges it to a 0600 file for `lemonadectl download`), forwards `MODEL` to the container when set in the shell env, opens a root shell, then cleans up. Use it to sanity-check that the image boots and the model loads.
 - **`mock/nvidia-smi`:** lets you test `get_gpu_vram`/driver paths without an NVIDIA GPU. It caches output to `/tmp/nvidia-smi.mock` (+ `.mb` for the raw MB value) on first run and dispatches the `--query-gpu=...`/`--format=csv` flags used by `run.sh`.
 - **Coverage expectation:** informal (smoke-run the container); there is no test suite to extend.

@@ -26,49 +26,52 @@ SMALL_TIER_MAX_VRAM=30   # GB: vram <= 30 -> "small" profile, above -> "large"
 
 # ---------------------------------------------------------------------------
 # Model registry. Keys are the slugs used by the subcommands and by the
-# LEMONADE_MODEL env var in run.sh.
+# MODEL env var in run.sh. ornith's 25.3 GB checkpoint needs a 30GB+ GPU,
+# so run.sh only defaults to it at VRAM >= 30 (an explicit MODEL=ornith
+# loads it on smaller GPUs too, at the operator's risk).
 # ---------------------------------------------------------------------------
 
 # slug -> HuggingFace repo holding the GGUF files
 declare -A MODEL_HF_REPO=(
-    [qwen3-27b]="unsloth/Qwen3.8-27B-GGUF"
-    [ornith-35b]="ornith-ai/Ornith-1.5-35B-A3B-GGUF"
+    [qwen]="unsloth/Qwen3.8-27B-GGUF"
+    [ornith]="ornith-ai/Ornith-1.5-35B-A3B-GGUF"
 )
 
 # slug -> local directory name under $HF_MODELS_DIR
 #        (this directory name is what `lemonade load` addresses the model by)
 declare -A MODEL_DIR=(
-    [qwen3-27b]="Qwen3.8-27B-GGUF-UD-Q5_K_S"
-    [ornith-35b]="Ornith-1.5-35B-GGUF-Q5_K_M"
+    [qwen]="Qwen3.8-27B-GGUF-UD-Q5_K_S"
+    [ornith]="Ornith-1.5-35B-GGUF-Q5_K_M"
 )
 
 # slug -> main checkpoint file name(s) in the HF repo (space-separated for
 #        multi-part models)
 declare -A MODEL_CHECKPOINT=(
-    [qwen3-27b]="Qwen3.8-27B-UD-Q5_K_S.gguf"
-    [ornith-35b]="Ornith-1.5-35B-Q5_K_M.gguf"
+    [qwen]="Qwen3.8-27B-UD-Q5_K_S.gguf"
+    [ornith]="Ornith-1.5-35B-Q5_K_M.gguf"
 )
 
 # slug -> vision projection file name in the HF repo ("" = no mmproj)
 declare -A MODEL_MMPROJ=(
-    [qwen3-27b]="mmproj-BF16.gguf"
-    [ornith-35b]="mmproj-Ornith-1.5-35B-BF16.gguf"
+    [qwen]="mmproj-BF16.gguf"
+    [ornith]="mmproj-Ornith-1.5-35B-BF16.gguf"
 )
 
 # "slug|tier" -> --llamacpp-args value for `lemonade load`
 declare -A MODEL_LLAMACPP_ARGS=(
-    ["qwen3-27b|small"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-type none"
-    ["qwen3-27b|large"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2"
-    ["ornith-35b|small"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-type none"
-    ["ornith-35b|large"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2"
+    ["qwen|small"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-type none"
+    ["qwen|large"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2"
+    ["ornith|small"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-type none"
+    ["ornith|large"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2"
 )
 
 # "slug|tier" -> --ctx-size value for `lemonade load`
+# (ornith is flat 128000 in both tiers: it only ever runs on 30GB+ GPUs)
 declare -A MODEL_CTX_SIZE=(
-    ["qwen3-27b|small"]=110000
-    ["qwen3-27b|large"]=250000
-    ["ornith-35b|small"]=110000
-    ["ornith-35b|large"]=250000
+    ["qwen|small"]=110000
+    ["qwen|large"]=128000
+    ["ornith|small"]=128000
+    ["ornith|large"]=128000
 )
 
 # ---------------------------------------------------------------------------
@@ -124,7 +127,7 @@ tier_for_vram() {
 
 cmd_models() {
     local m t key
-    echo "Registered models (values for LEMONADE_MODEL):"
+    echo "Registered models (values for the MODEL env var in run.sh):"
     for m in $(known_models); do
         echo
         echo "  $m"

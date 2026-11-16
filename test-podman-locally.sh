@@ -24,6 +24,13 @@ NAME="fedora-lemonade-test"
 # rate limits); run.sh bridges it to lemonadectl as a file.
 RUN_ARGS=(-d -p 2222:22 -v "$HOME/.ssh/id_rsa_ovh.pub":/root/.ssh/authorized_keys:ro,Z --secret hf_token,type=env,target=HF_TOKEN --name "$NAME")
 
+# Forward MODEL (qwen|ornith) when set in this shell, so a non-default model
+# can be tested without rebuilding the image; left unset otherwise, in which
+# case run.sh falls back to its VRAM-based default.
+if [[ -n "${MODEL:-}" ]]; then
+    RUN_ARGS+=(-e "MODEL=$MODEL")
+fi
+
 # Best-effort cleanup: never trips set -e, so the happy path stays silent even
 # if rm hiccups. Called by the happy path and, after logs, by the EXIT trap.
 cleanup() {

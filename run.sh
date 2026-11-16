@@ -43,10 +43,30 @@ get_gpu_vram() {
 VRAM_GB=$(get_gpu_vram)
 echo "Detected GPU with ${VRAM_GB} GB VRAM"
 
-# Which network to download/load: picked via the LEMONADE_MODEL env var.
-# The default keeps the previous single-model behavior; `lemonadectl models`
-# lists the registry.
-MODEL="${LEMONADE_MODEL:-qwen3-27b}"
+# Which network to download/load: the MODEL env var (qwen|ornith) overrides
+# the default; any other value is a warning, not an error. The default
+# depends on VRAM: ornith's 25.3 GB checkpoint needs a 30GB+ GPU, so it is
+# the default only there; qwen covers smaller GPUs (and no GPU at all).
+if [[ "$VRAM_GB" -ge 30 ]]; then
+    DEFAULT_MODEL="ornith"
+else
+    DEFAULT_MODEL="qwen"
+fi
+MODEL="${MODEL:-$DEFAULT_MODEL}"
+case "$MODEL" in
+    ornith)
+        if [[ "$VRAM_GB" -lt 30 ]]; then
+            echo "WARNING: MODEL=ornith was set explicitly, but ornith needs a 30GB+ GPU and only ${VRAM_GB} GB were detected - loading it anyway, it may not fit in VRAM"
+        fi
+        ;;
+    qwen)
+        ;;
+    *)
+        echo "WARNING: MODEL='${MODEL}' is not 'qwen' or 'ornith', using default '${DEFAULT_MODEL}'"
+        MODEL="$DEFAULT_MODEL"
+        ;;
+esac
+echo "Selected model: ${MODEL} (VRAM: ${VRAM_GB} GB)"
 
 /usr/bin/sshd -D &
 
