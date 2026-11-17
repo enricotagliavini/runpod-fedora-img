@@ -19,7 +19,17 @@ set -euo pipefail
 
 NAME="fedora-lemonade-test"
 # Shared run flags; the `podman run ... fedora-lemonade` line is written once here.
-RUN_ARGS=(-d -p 2222:22 -v "$HOME/.ssh/id_rsa_ovh.pub":/root/.ssh/authorized_keys:ro,Z --name "$NAME")
+# The hf_token secret (podman secret store) is injected as the HF_TOKEN env var
+# (same mechanism as RunPod secrets) so the hf CLI runs authenticated (higher
+# rate limits); run.sh bridges it to lemonadectl as a file.
+RUN_ARGS=(-d -p 2222:22 -v "$HOME/.ssh/id_rsa_ovh.pub":/root/.ssh/authorized_keys:ro,Z --secret hf_token,type=env,target=HF_TOKEN --name "$NAME")
+
+# Forward MODEL (qwen|ornith) when set in this shell, so a non-default model
+# can be tested without rebuilding the image; left unset otherwise, in which
+# case run.sh falls back to its VRAM-based default.
+if [[ -n "${MODEL:-}" ]]; then
+    RUN_ARGS+=(-e "MODEL=$MODEL")
+fi
 
 # Best-effort cleanup: never trips set -e, so the happy path stays silent even
 # if rm hiccups. Called by the happy path and, after logs, by the EXIT trap.

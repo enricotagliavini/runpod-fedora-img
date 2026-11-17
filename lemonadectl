@@ -1,0 +1,353 @@
+#!/bin/bash
+#
+# lemonadectl - control the lemonade (lemond) inference service.
+#
+# Subcommands:
+#   models                          list the registered models
+#   download <model> [--mmproj]     fetch the model's GGUF checkpoints into the
+#                                   extra_models_dir; foreground, exits when the
+#                                   model is on disk
+#   start                           start lemond (long-running; run.sh backgrounds
+#                                   it). Model-agnostic: the server picks up
+#                                   whatever is in the extra_models_dir.
+#   load <model> --vram <GB>        load <model> into the running server using the
+#                                   per-model / per-VRAM-tier llama.cpp args
+#
+# The model registry below is the single source of truth for what a model is
+# (repo, files, local dir) and how it loads: adding a new network means adding
+# a few entries here, not touching run.sh.
+
+set -euo pipefail
+
+HF_MODELS_DIR="/var/cache/huggingface"
+LEMONADE_LOG="/var/log/lemonade.log"
+REQUIRED_CUDA13_DRIVER=580
+SMALL_TIER_MAX_VRAM=30   # GB: vram <= 30 -> "small" profile, above -> "large"
+
+# ---------------------------------------------------------------------------
+# Model registry. Keys are the slugs used by the subcommands and by the
+# MODEL env var in run.sh. ornith's 25.3 GB checkpoint needs a 30GB+ GPU,
+# so run.sh only defaults to it at VRAM >= 30 (an explicit MODEL=ornith
+# loads it on smaller GPUs too, at the operator's risk).
+# ---------------------------------------------------------------------------
+
+# slug -> HuggingFace repo holding the GGUF files
+declare -A MODEL_HF_REPO=(
+    [qwen]="unsloth/Qwen3.8-27B-GGUF"
+    [ornith]="ornith-ai/Ornith-1.5-35B-A3B-GGUF"
+)
+
+# slug -> local directory name under $HF_MODELS_DIR
+#        (this directory name is what `lemonade load` addresses the model by)
+declare -A MODEL_DIR=(
+    [qwen]="Qwen3.8-27B-GGUF-UD-Q5_K_S"
+    [ornith]="Ornith-1.5-35B-GGUF-Q5_K_M"
+)
+
+# slug -> main checkpoint file name(s) in the HF repo (space-separated for
+#        multi-part models)
+declare -A MODEL_CHECKPOINT=(
+    [qwen]="Qwen3.8-27B-UD-Q5_K_S.gguf"
+    [ornith]="Ornith-1.5-35B-Q5_K_M.gguf"
+)
+
+# slug -> vision projection file name in the HF repo ("" = no mmproj)
+declare -A MODEL_MMPROJ=(
+    [qwen]="mmproj-BF16.gguf"
+    [ornith]="mmproj-Ornith-1.5-35B-BF16.gguf"
+)
+
+# "slug|tier" -> --llamacpp-args value for `lemonade load`
+declare -A MODEL_LLAMACPP_ARGS=(
+    ["qwen|small"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-type none"
+    ["qwen|large"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2"
+    ["ornith|small"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-type none"
+    ["ornith|large"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2"
+)
+
+# --llamacpp-args applied to EVERY model/tier (the "common" profile: KV cache
+# reuse, batching, and cache RAM). cmd_load always prepends this to the
+# per-model/per-tier entry, so a newly registered model inherits it too.
+COMMON_LLAMACPP_ARGS="--cache-reuse 512 --batch-size 4096 --ubatch-size 2048 --cache-ram 20000"
+
+# "slug|tier" -> --ctx-size value for `lemonade load`
+# (ornith is flat 128000 in both tiers: it only ever runs on 30GB+ GPUs)
+declare -A MODEL_CTX_SIZE=(
+    ["qwen|small"]=110000
+    ["qwen|large"]=128000
+    ["ornith|small"]=128000
+    ["ornith|large"]=128000
+)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+usage() {
+    cat <<'EOF'
+lemonadectl - control the lemonade (lemond) inference service
+
+Usage:
+  lemonadectl models
+  lemonadectl download <model> [--mmproj] [--hf-token-file PATH]
+  lemonadectl start
+  lemonadectl load <model> --vram <GB>
+
+--hf-token-file PATH reads a HuggingFace token from the file (line breaks
+trimmed) and authenticates the hf download; an HF_TOKEN env var is used when
+the option is absent.
+
+Run 'lemonadectl models' to list the registered models.
+EOF
+    exit "${1:-1}"
+}
+
+known_models() {
+    printf '%s\n' "${!MODEL_HF_REPO[@]}" | sort
+}
+
+require_model() {
+    local m="${1:-}"
+    if [[ -z "${MODEL_HF_REPO[$m]:-}" ]]; then
+        {
+            echo "ERROR: unknown model '${m:-}'"
+            echo "Known models:"
+            known_models | sed 's/^/  /'
+        } >&2
+        exit 1
+    fi
+}
+
+tier_for_vram() {
+    if [[ "$1" -le "$SMALL_TIER_MAX_VRAM" ]]; then
+        echo "small"
+    else
+        echo "large"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+cmd_models() {
+    local m t key
+    echo "Registered models (values for the MODEL env var in run.sh):"
+    for m in $(known_models); do
+        echo
+        echo "  $m"
+        echo "    hf repo:      ${MODEL_HF_REPO[$m]}"
+        echo "    checkpoint:   ${MODEL_CHECKPOINT[$m]}"
+        if [[ -n "${MODEL_MMPROJ[$m]}" ]]; then
+            echo "    mmproj:       ${MODEL_MMPROJ[$m]}"
+        fi
+        echo "    local dir:    $HF_MODELS_DIR/${MODEL_DIR[$m]}"
+        for t in small large; do
+            key="$m|$t"
+            echo "    load ($t):    --llamacpp-args='${COMMON_LLAMACPP_ARGS} ${MODEL_LLAMACPP_ARGS[$key]}' --ctx-size ${MODEL_CTX_SIZE[$key]}"
+        done
+    done
+}
+
+cmd_download() {
+    local model="" hf_token_file="" with_mmproj=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --mmproj)
+                with_mmproj=1
+                shift
+                ;;
+            --hf-token-file)
+                if [[ $# -lt 2 ]]; then
+                    echo "ERROR: --hf-token-file requires a value" >&2
+                    exit 1
+                fi
+                hf_token_file="$2"
+                shift 2
+                ;;
+            -*)
+                echo "ERROR: unknown option for download: $1" >&2
+                usage
+                ;;
+            *)
+                if [[ -n "$model" ]]; then
+                    echo "ERROR: unexpected argument for download: $1" >&2
+                    usage
+                fi
+                model="$1"
+                shift
+                ;;
+        esac
+    done
+    require_model "$model"
+
+    command -v hf &>/dev/null || {
+        echo "[download] ERROR: 'hf' CLI not found, cannot download $model" >&2
+        exit 1
+    }
+
+    # hf auth: --hf-token-file (a 0400/0600 file, e.g. a podman secret chowned
+    # to this user by run.sh) wins over an already-provided HF_TOKEN env var
+    # (e.g. set directly for local runs). The token only ever reaches hf's
+    # environment — it is not printed and not put on any command line.
+    if [[ -n "$hf_token_file" ]]; then
+        if [[ ! -r "$hf_token_file" ]]; then
+            echo "[download] ERROR: cannot read HF token file: $hf_token_file" >&2
+            exit 1
+        fi
+        export HF_TOKEN="$(tr -d '\r\n' < "$hf_token_file")"
+    fi
+    if [[ -n "${HF_TOKEN:-}" ]]; then
+        echo "[download] hf will run authenticated (HF_TOKEN set)"
+    else
+        echo "[download] hf will run anonymously (no HF_TOKEN)"
+    fi
+
+    local repo="${MODEL_HF_REPO[$model]}"
+    local dir="$HF_MODELS_DIR/${MODEL_DIR[$model]}"
+    # shellcheck disable=SC2206  # word-splitting is intended: multi-part checkpoints
+    local files=(${MODEL_CHECKPOINT[$model]})
+    if [[ "$with_mmproj" -eq 1 ]]; then
+        if [[ -n "${MODEL_MMPROJ[$model]}" ]]; then
+            files+=("${MODEL_MMPROJ[$model]}")
+        else
+            echo "[download] $model has no mmproj, ignoring --mmproj"
+        fi
+    fi
+
+    mkdir -p "$dir"
+    echo "[download] hf download $repo ${files[*]} -> $dir"
+    hf download "$repo" "${files[@]}" --local-dir "$dir" || {
+        echo "[download] FAILED for $repo: ${files[*]}" >&2
+        exit 1
+    }
+
+    # keep the model folder tidy (huggingface leaves a download metadata .cache/ dir it ignores)
+    rm -rf "$dir/.cache"
+    echo "[download] $model ready in $dir"
+}
+
+cmd_start() {
+    if [[ $# -gt 0 ]]; then
+        echo "ERROR: start takes no arguments (it just starts lemond)" >&2
+        usage
+    fi
+
+    # Same as run.sh: persist to the file AND forward live to the container's
+    # stdout/stderr so `podman logs` and attached runs capture the server output too.
+    exec > >(tee -a "$LEMONADE_LOG") 2>&1
+    echo "[start] starting lemond"
+
+    ensure_cuda_compat
+
+    export RUNTIME_DIRECTORY=/run/lemonade
+    export STATE_DIRECTORY=/var/lib/lemonade
+    export CACHE_DIRECTORY=/var/cache/lemonade
+    export HF_HOME=/var/cache/lemonade/huggingface
+
+    exec /usr/bin/lemond
+}
+
+ensure_cuda_compat() {
+    # 1. Ensure nvidia-smi is available
+    if ! command -v nvidia-smi &>/dev/null; then
+        echo "[CUDA-Check] nvidia-smi not found. Skipping driver version check."
+        return 0
+    fi
+
+    # 2. Extract host driver major version
+    #    (|| true: nvidia-smi can fail without a working GPU; empty is handled below)
+    local host_driver_major
+    host_driver_major=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | cut -d'.' -f1 || true)
+
+    # nvidia-smi prints a multi-word failure message on stdout when it cannot
+    # reach the driver; only a bare number is a usable major version (a
+    # non-numeric value would be evaluated as an arithmetic expression below).
+    if ! [[ "${host_driver_major:-}" =~ ^[0-9]+$ ]]; then
+        echo "[CUDA-Check] Could not determine host driver major version (got: '${host_driver_major:-<empty>}). Skipping driver version check."
+        return 0
+    fi
+
+    if [[ "$host_driver_major" -lt "$REQUIRED_CUDA13_DRIVER" ]]; then
+        # 3. Dynamically discover installed CUDA compat directories (sorted highest version first)
+        #    (|| true: compgen exits non-zero when nothing matches; empty is handled below)
+        local compat_path
+        compat_path=$(compgen -G "/usr/local/cuda-13*/compat" | sort -rV | head -n1 || true)
+
+        if [[ -n "$compat_path" && -d "$compat_path" ]]; then
+            echo "[CUDA-Check] Host driver ($host_driver_major) < $REQUIRED_CUDA13_DRIVER. Enabling compat layer: $compat_path"
+
+            # Avoid duplicating entries if sourced multiple times
+            if [[ ":${LD_LIBRARY_PATH:-}:" != *":$compat_path:"* ]]; then
+                export LD_LIBRARY_PATH="$compat_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            fi
+        else
+            echo "[CUDA-Check] Warning: Host driver ($host_driver_major) requires compat layer, but no /usr/local/cuda-13*/compat directory was found!"
+        fi
+    else
+        echo "[CUDA-Check] Host driver ($host_driver_major) natively supports CUDA 13. No compat layer needed."
+    fi
+}
+
+cmd_load() {
+    local model="" vram=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --vram)
+                if [[ $# -lt 2 ]]; then
+                    echo "ERROR: --vram requires a value" >&2
+                    exit 1
+                fi
+                vram="$2"
+                shift 2
+                ;;
+            *)
+                if [[ -n "$model" ]]; then
+                    echo "ERROR: unexpected argument for load: $1" >&2
+                    usage
+                fi
+                model="$1"
+                shift
+                ;;
+        esac
+    done
+    require_model "$model"
+    if ! [[ "$vram" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: load requires --vram <GB> (integer)" >&2
+        exit 1
+    fi
+
+    local tier key load_args
+    tier=$(tier_for_vram "$vram")
+    key="$model|$tier"
+    # Common profile (KV cache reuse / batching / cache RAM) is shared by every
+    # model and tier; the per-model/per-tier entry only supplies what differs.
+    load_args="${COMMON_LLAMACPP_ARGS} ${MODEL_LLAMACPP_ARGS[$key]}"
+    echo "[load] $model (dir: ${MODEL_DIR[$model]}) with $tier profile for ${vram}GB VRAM"
+    lemonade load "${MODEL_DIR[$model]}" \
+        --llamacpp-args="${load_args}" \
+        --ctx-size "${MODEL_CTX_SIZE[$key]}" \
+        --save-options
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+main() {
+    local cmd="${1:-}"
+    if [[ -z "$cmd" ]]; then
+        usage
+    fi
+    shift
+    case "$cmd" in
+        models)           cmd_models "$@" ;;
+        download)         cmd_download "$@" ;;
+        start)            cmd_start "$@" ;;
+        load)             cmd_load "$@" ;;
+        help|-h|--help)   usage 0 ;;
+        *)                usage ;;
+    esac
+}
+
+main "$@"
