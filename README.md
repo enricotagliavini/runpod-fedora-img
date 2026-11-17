@@ -24,8 +24,8 @@ registry):
 | `ornith`| Ornith-1.5-35B-Q5_K_M (25.3 GB)| 30GB+     | default only on 30GB+ GPUs |
 
 The vision projection (`mmproj`, for the `vision` label) is downloaded only when
-the GPU has more than 30GB of VRAM. Note: **MTP/speculative decoding is disabled**
-in this image — it does not perform well with NVIDIA + llama-cpp.
+the GPU has more than 30GB of VRAM. Note: MTP/speculative decoding is also disabled
+when running on GPUs with less VRAM to let the model fit.
 
 ## Architecture: how it works at boot
 
@@ -76,23 +76,14 @@ The standard flow:
    This pushes to `ghcr.io/enricotagliavini/fedora-lemonade:latest`.
 3. **Start the container** (as a second Run Command / Run Template). Provide the
    HuggingFace token as a RunPod **Secret** named `HF_TOKEN` so the download can
-   authenticate; set `MODEL` as an optional Secret to override the VRAM default.
-   ```bash
-   cd /workspace && podman run -d --name fedora-lemonade -p 2222:22 \
-     -e "HF_TOKEN=env:HF_TOKEN" -e "MODEL=qwen" fedora-lemonade
-   ```
-   (RunPod surfaces Secret env vars automatically — adjust the syntax to your
-   template's provider.)
+   authenticate; to force the use of a model, regardless of the available VRAM
+   set `MODEL`, when unset a default is picked based on VRAM.
 
 The public key (`id_rsa.pub`, committed in the repo) is baked into
 `/root/.ssh/authorized_keys`, so SSH in with the matching private key:
 
-```bash
-ssh -p 2222 root@localhost
-```
-
-Logs are streamed live with `podman logs -f fedora-lemonade` and persisted to
-`/var/log/run.log` (bootstrap + VRAM) and `/var/log/lemonade.log` (the server).
+Logs are streamed live with `podman logs -f fedora-lemonade` (when running locally)
+and persisted to `/var/log/run.log` (bootstrap + VRAM) and `/var/log/lemonade.log` (the server).
 The container auto-shuts down after an 8-hour safety-net sleep.
 
 ## Run locally (test the image without RunPod)
