@@ -68,7 +68,7 @@ declare -A MODEL_LLAMACPP_ARGS=(
 # --llamacpp-args applied to EVERY model/tier (the "common" profile: KV cache
 # reuse, batching, and cache RAM). cmd_load always prepends this to the
 # per-model/per-tier entry, so a newly registered model inherits it too.
-COMMON_LLAMACPP_ARGS="--cache-reuse 512 --batch-size 4096 --ubatch-size 2048 --cache-ram 20000"
+COMMON_LLAMACPP_ARGS="--cache-reuse 512 --batch-size 4096 --ubatch-size 4096 --cache-ram 20000"
 
 # "slug|tier" -> --ctx-size value for `lemonade load`
 # (ornith is flat 128000 in both tiers: it only ever runs on 30GB+ GPUs)
