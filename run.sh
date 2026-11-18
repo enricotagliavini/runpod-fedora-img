@@ -69,18 +69,26 @@ esac
 echo "Selected model: ${MODEL} (VRAM: ${VRAM_GB} GB)"
 
 # SSH access. RunPod injects one or more newline-separated public keys in
-# PUBLIC_KEY (one per line); when it's unset/empty (local testing, rebuilds
-# without a secret) we fall back to the deployment key baked into the image at
-# build time (/root/.ssh/fallback_key.pub). sshd reads this file per
-# connection, so it only needs to be in place before anyone authenticates;
-# StrictModes wants 700 on ~/.ssh and 600 on authorized_keys.
+# PUBLIC_KEY (one per line); by default we use them as /root/.ssh/authorized_keys.
+# An explicit IGNORE_PUBLIC_KEY (1|yes|true, case-insensitive) bypasses that and
+# loads the key baked into the image at build time (/root/.ssh/fallback_key.pub)
+# instead. sshd reads authorized_keys per connection, so this only needs to run
+# before anyone authenticates; StrictModes wants 700 on ~/.ssh and 600 on
+# authorized_keys.
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh
-if [[ -n "${PUBLIC_KEY:-}" ]]; then
+shopt -s nocasematch
+case "${IGNORE_PUBLIC_KEY:-}" in
+    1|yes|true) load_public_key=0 ;;
+    *)          load_public_key=1 ;;
+esac
+shopt -u nocasematch
+if [[ "$load_public_key" -eq 1 && -n "${PUBLIC_KEY:-}" ]]; then
     # RunPod: the env var is the complete, trusted set of keys.
     printf '%s\n' "$PUBLIC_KEY" > /root/.ssh/authorized_keys
 else
-    # Fallback: the key baked into the image at build time.
+    # Fallback (or bypassed via IGNORE_PUBLIC_KEY): the key baked into the image
+    # at build time.
     cp /root/.ssh/fallback_key.pub /root/.ssh/authorized_keys
 fi
 chmod 600 /root/.ssh/authorized_keys
