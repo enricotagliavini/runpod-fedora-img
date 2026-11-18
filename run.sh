@@ -68,6 +68,23 @@ case "$MODEL" in
 esac
 echo "Selected model: ${MODEL} (VRAM: ${VRAM_GB} GB)"
 
+# SSH access. RunPod injects one or more newline-separated public keys in
+# PUBLIC_KEY (one per line); when it's unset/empty (local testing, rebuilds
+# without a secret) we fall back to the deployment key baked into the image at
+# build time (/root/.ssh/fallback_key.pub). sshd reads this file per
+# connection, so it only needs to be in place before anyone authenticates;
+# StrictModes wants 700 on ~/.ssh and 600 on authorized_keys.
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+if [[ -n "${PUBLIC_KEY:-}" ]]; then
+    # RunPod: the env var is the complete, trusted set of keys.
+    printf '%s\n' "$PUBLIC_KEY" > /root/.ssh/authorized_keys
+else
+    # Fallback: the key baked into the image at build time.
+    cp /root/.ssh/fallback_key.pub /root/.ssh/authorized_keys
+fi
+chmod 600 /root/.ssh/authorized_keys
+
 /usr/bin/sshd -D &
 
 mkdir -p /var/cache/huggingface /var/cache/lemonade/huggingface /root/.config/htop

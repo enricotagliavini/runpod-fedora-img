@@ -16,7 +16,7 @@ RUN dnf update -y && \
     uv pip install --system huggingface_hub
     # dnf install -y cuda-toolkit \
 
-COPY id_rsa.pub /root/.ssh/authorized_keys
+COPY id_rsa.pub /root/.ssh/fallback_key.pub
 RUN wget -O /etc/yum.repos.d/ai-custom-infra.repo https://enricotagliavini.github.io/repositories/ai-custom-infra/ai-custom-infra.repo && \
     dnf install -y lemonade-server llama-cpp && dnf clean all
 
