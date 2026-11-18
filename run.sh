@@ -68,13 +68,17 @@ case "$MODEL" in
 esac
 echo "Selected model: ${MODEL} (VRAM: ${VRAM_GB} GB)"
 
-# SSH access. RunPod injects one or more newline-separated public keys in
-# PUBLIC_KEY (one per line); by default we use them as /root/.ssh/authorized_keys.
-# An explicit IGNORE_PUBLIC_KEY (1|yes|true, case-insensitive) bypasses that and
-# loads the key baked into the image at build time (/root/.ssh/fallback_key.pub)
-# instead. sshd reads authorized_keys per connection, so this only needs to run
-# before anyone authenticates; StrictModes wants 700 on ~/.ssh and 600 on
-# authorized_keys.
+# SSH access. RunPod documents PUBLIC_KEY but, at present, does not actually set
+# it (verified), so treat it as optional. SSH_PUBLIC_KEYS is the reliable source:
+# its value is base64-encoded because RunPod's UI can't hold newlines in a
+# variable, so we base64-decode it here to recover the keys. Keys from PUBLIC_KEY
+# (plain text) and SSH_PUBLIC_KEYS are concatenated into /root/.ssh/authorized_keys,
+# with the fallback key baked into the image always appended last so there is a
+# known-good key to log in with even if the injected keys are flaky or wrong.
+# An explicit IGNORE_PUBLIC_KEY (1|yes|true, case-insensitive) bypasses only
+# PUBLIC_KEY; SSH_PUBLIC_KEYS is still honored. sshd reads authorized_keys per
+# connection, so this only needs to run before anyone authenticates; StrictModes
+# wants 700 on ~/.ssh and 600 on authorized_keys.
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh
 shopt -s nocasematch
@@ -83,14 +87,23 @@ case "${IGNORE_PUBLIC_KEY:-}" in
     *)          load_public_key=1 ;;
 esac
 shopt -u nocasematch
+
+# Build authorized_keys from PUBLIC_KEY (plain text) then SSH_PUBLIC_KEYS
+# (base64-decoded). Concatenating with a trailing newline per source keeps each
+# key on its own line even if a source did not already end with one.
+authorized_keys_content=""
 if [[ "$load_public_key" -eq 1 && -n "${PUBLIC_KEY:-}" ]]; then
-    # RunPod: the env var is the complete, trusted set of keys.
-    printf '%s\n' "$PUBLIC_KEY" > /root/.ssh/authorized_keys
-else
-    # Fallback (or bypassed via IGNORE_PUBLIC_KEY): the key baked into the image
-    # at build time.
-    cp /root/.ssh/fallback_key.pub /root/.ssh/authorized_keys
+    authorized_keys_content+="${PUBLIC_KEY}"$'\n'
 fi
+if [[ -n "${SSH_PUBLIC_KEYS:-}" ]]; then
+    if decoded_keys=$(printf '%s' "$SSH_PUBLIC_KEYS" | base64 -d 2>/dev/null); then
+        authorized_keys_content+="${decoded_keys}"$'\n'
+    fi
+fi
+# Always append the baked-in fallback key last: RunPod's key injection is
+# unreliable, so authorized_keys must always contain a known-good key.
+authorized_keys_content+="$(cat /root/.ssh/fallback_key.pub)"$'\n'
+printf '%s' "$authorized_keys_content" > /root/.ssh/authorized_keys
 chmod 600 /root/.ssh/authorized_keys
 
 /usr/bin/sshd -D &
