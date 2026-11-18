@@ -58,17 +58,24 @@ declare -A MODEL_MMPROJ=(
 )
 
 # "slug|tier" -> --llamacpp-args value for `lemonade load`
+# WARNING --ubatch-size can make the llama-server crash, depending on the networ architecture
+# Ornith is a MoE + Gated DeltaNet architecture. For Ornith keep the ubatch-size at 2048 or lower
+# The CUDA kernels for Gated DeltaNet state-space layers and MoE routing allocate fixed or
+# dynamically sized scratch buffers proportional to the micro-batch size (ub). Pushing -ub to 4096
+ # the internal pointer arithmetic and tensor copy kernel (ggml_cuda_cpy) exceeded the kernel's
+ # internal threadblock or shared memory allocation bounds, resulting in an illegal memory access
+ # instead of an out-of-memory error.
 declare -A MODEL_LLAMACPP_ARGS=(
-    ["qwen|small"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-type none"
-    ["qwen|large"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2"
-    ["ornith|small"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-type none"
-    ["ornith|large"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2"
+    ["qwen|small"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-type none --ubatch-size 4096"
+    ["qwen|large"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2 --ubatch-size 4096"
+    ["ornith|small"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-type none --ubatch-size 2048"
+    ["ornith|large"]="--cache-type-k q8_0 --cache-type-v q8_0 --spec-draft-n-max 2 --ubatch-size 2048"
 )
 
 # --llamacpp-args applied to EVERY model/tier (the "common" profile: KV cache
 # reuse, batching, and cache RAM). cmd_load always prepends this to the
 # per-model/per-tier entry, so a newly registered model inherits it too.
-COMMON_LLAMACPP_ARGS="--cache-reuse 512 --batch-size 4096 --ubatch-size 4096 --cache-ram 20000"
+COMMON_LLAMACPP_ARGS="--cache-reuse 512 --batch-size 4096 --cache-ram 20000"
 
 # "slug|tier" -> --ctx-size value for `lemonade load`
 # (ornith is flat 128000 in both tiers: it only ever runs on 30GB+ GPUs)
