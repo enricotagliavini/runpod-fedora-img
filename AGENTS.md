@@ -30,23 +30,28 @@ OCI image on RunPod GPU pod -> podman run fedora-lemonade
         |        default: ornith at VRAM>=30GB, else qwen; invalid MODEL -> warn + default
         |     3. /usr/bin/sshd -D &                          (SSH on :22, keys from id_rsa.pub)
         |     4. mkdir + chown lemonade:lemonade of cache/state dirs
-        |     5. lemonadectl download $MODEL [--mmproj] [--hf-token-file PATH]
+        |     5. prepare_cuda_compat(): host driver < CUDA-major floor (525 for CUDA12, 580 for 13)?
+        |        (prefer /proc/driver/nvidia/version, nvidia-smi fallback, HOST_DRIVER_MAJOR override)
+        |        install cuda-compat-<maj>-<min> at runtime (NOT baked in, ~109MB), stage shim dir to
+        |        /run/cuda_compat_dir for 'lemonadectl start' to apply; no-op when the host driver is new enough
+        |     6. lemonadectl download $MODEL [--mmproj] [--hf-token-file PATH]
         |        (as `lemonade` user, FOREGROUND; run.sh blocks until the model
         |        is on disk; --mmproj only when VRAM>30GB; HF_TOKEN env var is
         |        bridged to a 0600 /run/hf_token for the download's duration)
-        |     6. lemonadectl start &                         (as `lemonade` user, backgrounded)
-        |     7. wait for `lemonade status`, then `lemonade config set` x5
+        |     7. lemonadectl start &                         (as `lemonade` user, backgrounded)
+        |     8. wait for `lemonade status`, then `lemonade config set` x5
         |        (extra_models_dir + llamacpp cuda/cpu bin, backend, args)
-        |     8. lemonadectl load $MODEL --vram $VRAM_GB     (per-model args/ctx from registry:
+        |     9. lemonadectl load $MODEL --vram $VRAM_GB     (per-model args/ctx from registry:
         |        small tier = VRAM<=30GB; qwen ctx 110k/128k, ornith ctx 128k)
-        |     9. safety net: sleep 8h; kill %1 %2; sleep 20; kill -9
+        |     10. safety net: sleep 8h; kill %1 %2; sleep 20; kill -9
         |
         +-- lemonadectl start (backgrounded; model-agnostic — the server just scans
         |                      the extra_models_dir, which model serves is set by load)
               1. export RUNTIME/STATE/CACHE_DIRECTORY, HF_HOME=/var/cache/lemonade/huggingface
-              2. CUDA-13 driver gate: need host driver >= 580
-                 - if host driver < 580: prepend /usr/local/cuda-13*/compat (sorted, deduped) to LD_LIBRARY_PATH
-                 - else: native CUDA 13 OK
+              2. CUDA-13 driver gate: read the shim dir staged by run.sh at
+                 $CUDA_COMPAT_STATE (/run/cuda_compat_dir); apply it to
+                 LD_LIBRARY_PATH (sudo strips it before we reach the lemonade
+                 user), deduped; absent => host driver supports CUDA natively
               3. exec /usr/bin/lemond                          (actual server process)
 ```
 
@@ -62,7 +67,8 @@ OCI image on RunPod GPU pod -> podman run fedora-lemonade
 
 **Observed behaviors / gotchas:**
 - `MTP` (draft/speculative decoding) is **disabled** with a comment: *"MTP doesn't work well with nvidia and llama-cpp. Performance is bad, let's not use it."*
-- CUDA-13 backend requires NVIDIA driver major version **>= 580**; otherwise the `cuda-13*/compat` shim is needed on `LD_LIBRARY_PATH`.
+- CUDA-13 backend needs a host NVIDIA driver major >= 580. `prepare_cuda_compat()` (run.sh) compares the host driver against the CUDA-major floor (525 for CUDA12, 580 for 13); if older, it installs **`cuda-compat-<maj>-<min>` at runtime** (not baked into the image, saves ~109MB) and stages the shim dir at `/run/cuda_compat_dir`. Detection reads `/proc/driver/nvidia/version` (fallback `nvidia-smi`, override `HOST_DRIVER_MAJOR`), and the compat minor is derived from the installed cudart RPM so it stays correct if the image moves CUDA versions. `lemonadectl start` applies that shim to `LD_LIBRARY_PATH`.
+- **CUDA version support policy:** the image supports the latest CUDA major and the one before it — currently **13 + 12**. When NVIDIA ships a new major (e.g. 14), the image switches to shipping that plus the previous major (**14 + 13**) and drops the older one (12). This is a *packaging* choice (which CUDA major `llama-cpp`/`lemonade-server` are built against, and therefore which cudart RPM lands in the image); `run.sh`'s runtime detection is version-agnostic and keeps working unchanged. When the tiers shift, update the `min_driver_for_cuda` map in `run.sh` (currently `12 → 525`, `13 → 580`) with the new majors' driver floors, then drop the old entry.
 - The `get_gpu_vram()` fallback heuristic table (by GPU name) is commented out — detection now trusts `nvidia-smi`'s reported `memory.total`.
 - VRAM split: `<=30GB` → small profile, `>30GB` → large profile (per-model in the lemonadectl registry). Context sizes: qwen 110000 (small) / 128000 (large); ornith 128000 in both tiers.
 
@@ -77,6 +83,7 @@ OCI image on RunPod GPU pod -> podman run fedora-lemonade
 | `/var/cache/lemonade` | Lemonade runtime cache/recipes + `HF_HOME` (`huggingface/` subdir); owned by `lemonade` |
 | `/var/lib/lemonade` | Lemonade **state** (created/exported, `STATE_DIRECTORY`) |
 | `/run/lemonade` | Lemonade **runtime** dir (`RUNTIME_DIRECTORY`) |
+| `/run/cuda_compat_dir` | tmpfs file where run.sh stages the resolved CUDA compat shim dir (set by `prepare_cuda_compat`); `lemonadectl start` reads it and applies to `LD_LIBRARY_PATH` |
 | `/root/.ssh/authorized_keys` | Deployed key (`id_rsa.pub`) for root SSH |
 | `mock/nvidia-smi` | Fake `nvidia-smi` emulating RTX 4090 / 24GB VRAM for test envs |
 
@@ -96,7 +103,7 @@ All scripts use `set -euo pipefail`. `bash` only.
 ## Code Conventions & Common Patterns
 
 - **Shell style:** `#!/bin/bash`, `set -euo pipefail`, functions grouped by purpose, `&&/||` chains in `RUN` layers, `ed25519` ssh-keygen, `chmod +x` on copied scripts.
-- **Idempotency:** `lemonadectl start` guards `LD_LIBRARY_PATH` with `if [[ ":$LD_LIBRARY_PATH:" != *":$COMPAT_PATH:"* ]]` to avoid dup shim entries on multi-source.
+- **Idempotency:** `lemonadectl start` reads the shim dir staged by run.sh at `$CUDA_COMPAT_STATE` (`/run/cuda_compat_dir`) and applies it to `LD_LIBRARY_PATH`, guarding against dup entries with a `if [[ ":$LD_LIBRARY_PATH:" != *":$compat_path:"* ]]` test (multi-source compat dirs deduped).
 - **Model registry:** per-model facts (HF repo, checkpoint/mmproj file names, local dir, per-VRAM-tier load args) live in the associative-array registry at the top of `lemonadectl`, keyed by slug; `run.sh` only passes the slug + detected VRAM.
 - **Backgrounding + logging:** services are `&`-ed while the script's own stdout is redirected (`exec >> /var/log/... 2>&1`), then a hard `sleep 8h` safety-net kills `%1 %2`.
 - **Lemonade config via `config set`:** namespace `llamacpp.*` → keys `cuda_bin`, `cpu_bin`, `backend` (`cuda`|`system`), `args`. These configure the CUDA-backed llama-server entrypoint.
@@ -108,9 +115,9 @@ All scripts use `set -euo pipefail`. `bash` only.
 
 | File | Role |
 |------|------|
-| `Dockerfile` | Fedora 44 base; installs NVIDIA CUDA libs (`libcublas13-cuda-13`, `cuda-compat-13-3`, `xorg-x11-drv-nvidia-cuda`), `openssh-server`, `lemonade-server` + `llama-cpp` from the `ai-custom-infra` custom RPM repo; exposes :22; CMD `/app/run.sh` |
+| `Dockerfile` | Fedora 44 base; the CUDA 44 yum repo (so `dnf install cuda-compat-*`, plus the `libcublas`/`libcudart` sonames that `llama-cpp` Requires, resolve at build time), `openssh-server`, `lemonade-server` + `llama-cpp` from the `ai-custom-infra` custom RPM repo; exposes :22; CMD `/app/run.sh`. `libcublas` + `cuda-cudart` arrive automatically as `llama-cpp` deps (no explicit install); `cuda-compat` is installed at runtime by run.sh, not baked in (saves ~109MB) |
 | `run.sh` | Entrypoint: VRAM detect, model selection (`MODEL` env, VRAM-based default), sshd, cache setup, `lemonadectl download` (foreground) → `lemonadectl start &`, lemonade `config set`, `lemonadectl load`, safety net |
-| `lemonadectl` | Model registry + CLI: `models`, `download <model> [--mmproj] [--hf-token-file PATH]`, `start` (CUDA-13 driver/compat gate → `exec lemond`), `load <model> --vram <GB>` |
+| `lemonadectl` | Model registry + CLI: `models`, `download <model> [--mmproj] [--hf-token-file PATH]`, `start` (applies the compat shim staged by run.sh at `$CUDA_COMPAT_STATE` → `exec lemond`), `load <model> --vram <GB>` |
 | `build.sh` | One-line `podman build` |
 | `push-to-ghcr.sh` | Tag+push to GHCR (`-x` verbose) |
 | `test-podman-locally.sh` | Local detached run w/ SSH + key mount |
@@ -121,7 +128,7 @@ All scripts use `set -euo pipefail`. `bash` only.
 
 - **Container runtime:** Podman. Image is OCI-compliant and meant for RunPod; the Dockerfile uses `docker://registry.fedoraproject.org/fedora-minimal:44` as base and `push-to-ghcr.sh` tags `localhost/...`.
 - **Package management:** Fedora `dnf` inside the image. Lemonade and llama-cpp are **locally built RPMs** from the author's GitHub-hosted repo (`ai-custom-infra.repo`) — treat these as first-party builds, not upstream packages.
-- **Tooling:** bash scripting idioms; `nvidia-smi` `--query-gpu=count|name|memory.total --format=csv` parsing; `bc` for integer VRAM math; `compgen -G` for globbing cuda compat dirs.
+- **Tooling:** bash scripting idioms; `nvidia-smi` `--query-gpu=count|name|memory.total --format=csv` parsing; host-driver read from `/proc/driver/nvidia/version` (fallback `nvidia-smi`, override `HOST_DRIVER_MAJOR`); image CUDA version from `rpm -qa 'cuda-cudart-*'`; `bc` for integer VRAM math; `compgen -G` for globbing cuda compat dirs.
 
 ## Testing & QA
 

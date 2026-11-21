@@ -41,11 +41,12 @@ podman run fedora-lemonade     # run.sh (entrypoint, WORKDIR /app)
   2. choose MODEL              MODEL env var, else VRAM-based default (ornith @ ≥30GB, qwen otherwise)
   3. /usr/bin/sshd -D &        SSH on :22 (public key baked into the image: id_rsa.pub)
   4. prepare cache dirs       /var/cache/{huggingface,lemonade}... (owned by user lemonade)
-  5. lemonadectl download     download GGUF checkpoints (foreground, blocks until on disk)
-  6. lemonadectl start &       background the lemond server
-  7. wait for server ready
-  8. lemonade config set ...   point the server at the models + cuda backend
-  9. lemonadectl load         load the chosen model with a per-VRAM-tier profile
+  5. cuda compat gate         host driver < 580? install cuda-compat-13-<min> at runtime (not baked in), stage its dir
+  6. lemonadectl download     download GGUF checkpoints (foreground, blocks until on disk)
+  7. lemonadectl start &       background the lemond server
+  8. wait for server ready
+  9. lemonade config set ...   point the server at the models + cuda backend
+  10. lemonadectl load         load the chosen model with a per-VRAM-tier profile
         |
         v
   safety net: sleep 8h; kill the container (so a forgotten run does not drain funding)
@@ -107,7 +108,7 @@ down and dumps the logs (see the script header for why there is no `--rm`).
 | Model           | `MODEL` env var (`qwen`\|`ornith`) | Which model is downloaded and loaded |
 | GPU profile     | Detected from VRAM | ≤30GB → small, >30GB → large (context size, mmproj, vision) |
 | HuggingFace auth| `HF_TOKEN` env var | Passes the token to `lemonadectl download` as a 0600 file |
-| NVIDIA driver    | Host driver major version | CUDA 13 backend needs driver ≥ 580; otherwise a `cuda-13*/compat` shim is prepended to `LD_LIBRARY_PATH` |
+| NVIDIA driver    | Host driver major version | CUDA 13 backend needs driver ≥ 580; if the host driver is older, `cuda-compat-13-<min>` is installed at runtime and its shim is prepended to `LD_LIBRARY_PATH` |
 
 The per-model facts (HF repo, checkpoint files, local dir, and per-VRAM-tier
 load args) live in the model registry in [`lemonadectl`](lemonadectl): adding a

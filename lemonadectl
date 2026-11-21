@@ -21,7 +21,9 @@ set -euo pipefail
 
 HF_MODELS_DIR="/var/cache/huggingface"
 LEMONADE_LOG="/var/log/lemonade.log"
-REQUIRED_CUDA13_DRIVER=580
+# run.sh stages the CUDA compat shim dir here (if any) at boot, based on the host
+# driver version; 'start' applies it to LD_LIBRARY_PATH. Absent => no shim needed.
+CUDA_COMPAT_STATE="/run/cuda_compat_dir"
 SMALL_TIER_MAX_VRAM=30   # GB: vram <= 30 -> "small" profile, above -> "large"
 
 # ---------------------------------------------------------------------------
@@ -256,43 +258,36 @@ cmd_start() {
 }
 
 ensure_cuda_compat() {
-    # 1. Ensure nvidia-smi is available
-    if ! command -v nvidia-smi &>/dev/null; then
-        echo "[CUDA-Check] nvidia-smi not found. Skipping driver version check."
-        return 0
-    fi
-
-    # 2. Extract host driver major version
-    #    (|| true: nvidia-smi can fail without a working GPU; empty is handled below)
-    local host_driver_major
-    host_driver_major=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | cut -d'.' -f1 || true)
-
-    # nvidia-smi prints a multi-word failure message on stdout when it cannot
-    # reach the driver; only a bare number is a usable major version (a
-    # non-numeric value would be evaluated as an arithmetic expression below).
-    if ! [[ "${host_driver_major:-}" =~ ^[0-9]+$ ]]; then
-        echo "[CUDA-Check] Could not determine host driver major version (got: '${host_driver_major:-<empty>}). Skipping driver version check."
-        return 0
-    fi
-
-    if [[ "$host_driver_major" -lt "$REQUIRED_CUDA13_DRIVER" ]]; then
-        # 3. Dynamically discover installed CUDA compat directories (sorted highest version first)
-        #    (|| true: compgen exits non-zero when nothing matches; empty is handled below)
+    # run.sh (as root) has already decided, from the host driver version, whether a
+    # CUDA compat shim is needed and, if so, written the resolved shim directory to
+    # $CUDA_COMPAT_STATE. We apply it HERE, inside `start`, because sudo strips
+    # LD_LIBRARY_PATH before we reach the lemonade user. A missing file means the
+    # host driver supports the image's CUDA natively: nothing to do.
+    if [[ -r "$CUDA_COMPAT_STATE" ]]; then
         local compat_path
-        compat_path=$(compgen -G "/usr/local/cuda-13*/compat" | sort -rV | head -n1 || true)
-
+        compat_path="$(cat "$CUDA_COMPAT_STATE")"
         if [[ -n "$compat_path" && -d "$compat_path" ]]; then
-            echo "[CUDA-Check] Host driver ($host_driver_major) < $REQUIRED_CUDA13_DRIVER. Enabling compat layer: $compat_path"
-
-            # Avoid duplicating entries if sourced multiple times
+            echo "[CUDA-Check] Applying staged CUDA compat layer: $compat_path"
+            # Avoid duplicating entries if started multiple times.
             if [[ ":${LD_LIBRARY_PATH:-}:" != *":$compat_path:"* ]]; then
                 export LD_LIBRARY_PATH="$compat_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
             fi
-        else
-            echo "[CUDA-Check] Warning: Host driver ($host_driver_major) requires compat layer, but no /usr/local/cuda-13*/compat directory was found!"
+            return 0
+        fi
+        echo "[CUDA-Check] Warning: $CUDA_COMPAT_STATE points to '$compat_path', which is missing!"
+    fi
+
+    # Fallback: nothing was staged, so discover any installed compat dir. Use it
+    # only if one exists (best-effort: compgen is non-zero when nothing matches).
+    local compat_path
+    compat_path=$(compgen -G "/usr/local/cuda-*/compat" | sort -rV | head -n1 || true)
+    if [[ -n "$compat_path" && -d "$compat_path" ]]; then
+        echo "[CUDA-Check] No staged compat; using discovered $compat_path"
+        if [[ ":${LD_LIBRARY_PATH:-}:" != *":$compat_path:"* ]]; then
+            export LD_LIBRARY_PATH="$compat_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         fi
     else
-        echo "[CUDA-Check] Host driver ($host_driver_major) natively supports CUDA 13. No compat layer needed."
+        echo "[CUDA-Check] No CUDA compat layer found; relying on the host driver."
     fi
 }
 
