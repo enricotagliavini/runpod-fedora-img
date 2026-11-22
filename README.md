@@ -65,6 +65,15 @@ podman build -t fedora-lemonade .
 
 Build output is the `fedora-lemonade` image, deployable on any GPU pod.
 
+**Package-pollution workaround:** the NVIDIA CUDA repo ships
+`datacenter-gpu-manager-*-cuda*-cublas` packages that advertise a `libcublas`
+provide they don't actually ship. DNF can grab one to satisfy the real
+`libcublas13` dependency, and then the library is missing at runtime. So the
+Dockerfile appends `excludepkgs=datacenter-gpu-manager-*-cuda*-cublas` into the
+downloaded `/etc/yum.repos.d/cuda-fedora44.repo` before installing. This is a
+stopgap: once NVIDIA fixes the fake `libcublas` provide, drop the line (and the
+two Dockerfile comments) and it can be removed entirely.
+
 ## Run on RunPod
 
 The standard flow:
