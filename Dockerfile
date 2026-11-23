@@ -21,7 +21,7 @@ RUN dnf update -y && \
 COPY id_rsa.pub /root/.ssh/fallback_key.pub
 COPY screenrc /root/.screenrc
 RUN wget -O /etc/yum.repos.d/ai-custom-infra.repo https://enricotagliavini.github.io/repositories/ai-custom-infra/ai-custom-infra.repo && \
-    dnf install -y lemonade-server llama-cpp && dnf clean all
+    dnf install -y lemonade-server llama-cpp llama-cpp-cuda && dnf clean all
 
 COPY lemonadectl /app/lemonadectl
 COPY run.sh /app/run.sh
