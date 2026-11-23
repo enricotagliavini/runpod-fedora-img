@@ -40,6 +40,113 @@ get_gpu_vram() {
     echo "$vram_gb"
 }
 
+# ---------------------------------------------------------------------------
+# CUDA 13 compat-layer gate
+#
+# The llama-cpp CUDA backend needs CUDA 13, whose userspace libs require a host
+# NVIDIA driver of major >= 580. Every host in this deployment ships at least a
+# CUDA-12 driver (major >= 525), so the only gap worth bridging is
+# image=CUDA13 vs host driver 525-579. When that gap exists we install
+# cuda-compat-<maj>-<min> at runtime (it is deliberately NOT baked into the
+# image, to save ~109MB) and put its shim libcudart on LD_LIBRARY_PATH so lemond
+# can start on the older driver.
+#
+# Detection is self-correcting: the compat minor is derived from the cudart RPM
+# actually installed in the image (pulled in by llama-cpp), so it stays right if
+# the image ever moves to CUDA 12/14.
+# ---------------------------------------------------------------------------
+
+# tmpfs file where the resolved compat shim dir is staged for 'lemonadectl start'
+# (run.sh as root decides/stages it; lemonadectl as the lemonade user applies it,
+# because sudo strips LD_LIBRARY_PATH before we get there). Cleaned each boot.
+HOST_DRIVER_STATE="/run/cuda_compat_dir"
+
+# Host driver major version. Prefer /proc/driver/nvidia/version (no nvidia-smi
+# dependency); the driver line format varies across driver releases, so pull the
+# major from the first <major>.<minor> token rather than a fixed column.
+# HOST_DRIVER_MAJOR is an optional deterministic override (used for testing).
+host_driver_major() {
+    if [[ -n "${HOST_DRIVER_MAJOR:-}" ]]; then
+        echo "${HOST_DRIVER_MAJOR}"
+        return
+    fi
+    local ver=""
+    if [[ -r /proc/driver/nvidia/version ]]; then
+        ver=$(head -n1 /proc/driver/nvidia/version | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 || true)
+    fi
+    if [[ -z "$ver" ]]; then
+        # Fallback: nvidia-smi's "Driver Version: X.Y" (only a bare number is usable).
+        ver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1 || true)
+    fi
+    echo "${ver%%.*}"
+}
+
+# Image CUDA version parsed from the installed cudart RPM, e.g.
+# cuda-cudart-13-5-13.5.37 -> "13.5". Empty if no cudart RPM is present.
+image_cuda_version() {
+    local pkg fam major minor
+    pkg=$(rpm -qa 'cuda-cudart-*' 2>/dev/null | sort -V | tail -n1 || true)
+    if [[ -z "$pkg" ]]; then
+        echo ""
+        return
+    fi
+    fam="${pkg#cuda-cudart-}"      # strip "cuda-cudart-" -> "13-5-13.5.37"
+    major="${fam%%-*}"             # "13"
+    fam="${fam#*-}"                # strip "13-" -> "5-13.5.37"
+    minor="${fam%%-*}"             # "5"
+    echo "${major}.${minor}"
+}
+
+# Minimum host driver major version required for a given CUDA major version.
+min_driver_for_cuda() {
+    case "$1" in
+        12) echo 525 ;;
+        *)  echo 580 ;;           # 13+: CUDA 13.x requires driver major >= 580
+    esac
+}
+
+# Decide whether the host driver can run the image's CUDA backend natively, and if
+# not, install the compat shim at runtime and stage its dir for 'lemonadectl start'.
+prepare_cuda_compat() {
+    # Each boot starts from a clean slate (tmpfs; /run is wiped on restart).
+    rm -f "$HOST_DRIVER_STATE"
+
+    local image_cuda image_cuda_major image_cuda_minor drv drv_min compat_pkg compat_path
+    image_cuda=$(image_cuda_version)
+    if [[ -z "$image_cuda" ]]; then
+        echo "[CUDA-Compat] Could not detect image CUDA version (no cudart RPM found). Skipping compat setup."
+        return 0
+    fi
+    image_cuda_major="${image_cuda%%.*}"
+    image_cuda_minor="${image_cuda#*.}"
+
+    drv=$(host_driver_major)
+    if ! [[ "$drv" =~ ^[0-9]+$ ]]; then
+        echo "[CUDA-Compat] Could not determine host driver major version ('$drv'). Skipping compat setup."
+        return 0
+    fi
+
+    drv_min=$(min_driver_for_cuda "$image_cuda_major")
+    compat_pkg="cuda-compat-${image_cuda_major}-${image_cuda_minor}"
+
+    if [[ "$drv" -ge "$drv_min" ]]; then
+        echo "[CUDA-Compat] Host driver ($drv) natively supports CUDA ${image_cuda}. No compat layer needed."
+        return 0
+    fi
+
+    echo "[CUDA-Compat] Host driver ($drv) < $drv_min for CUDA ${image_cuda}: installing ${compat_pkg} at runtime..."
+    dnf install -y "$compat_pkg"
+    compat_path=$(compgen -G "/usr/local/cuda-${image_cuda_major}-${image_cuda_minor}/compat" | sort -rV | head -n1 || true)
+
+    if [[ -n "$compat_path" && -d "$compat_path" ]]; then
+        printf '%s' "$compat_path" > "$HOST_DRIVER_STATE"
+        chmod 644 "$HOST_DRIVER_STATE"
+        echo "[CUDA-Compat] Compat layer staged: $compat_path (lemonadectl start will put it on LD_LIBRARY_PATH)."
+    else
+        echo "[CUDA-Compat] Warning: installed ${compat_pkg} but no /usr/local/cuda-${image_cuda_major}-${image_cuda_minor}/compat directory was found!"
+    fi
+}
+
 VRAM_GB=$(get_gpu_vram)
 echo "Detected GPU with ${VRAM_GB} GB VRAM"
 
@@ -136,6 +243,9 @@ if [[ -n "${HF_TOKEN:-}" ]]; then
     chown lemonade:lemonade "$HF_TOKEN_TMP"
     HF_TOKEN_ARGS=(--hf-token-file "$HF_TOKEN_TMP")
 fi
+# Decide whether the host driver can run the image's CUDA backend natively, and,
+# if not, install the compat shim (not baked into the image) before lemond starts.
+prepare_cuda_compat
 sudo -u lemonade /app/lemonadectl download "$MODEL" "${MMPROJ_FLAG[@]}" "${HF_TOKEN_ARGS[@]}"
 if [[ -n "$HF_TOKEN_TMP" ]]; then
     rm -f "$HF_TOKEN_TMP"
