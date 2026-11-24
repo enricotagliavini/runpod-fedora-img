@@ -2,6 +2,22 @@
 
 set -euo pipefail
 
+# Failsafe against set -e tearing down too fast. When run.sh hits an unhandled
+# error it exits immediately, leaving almost no time to grab logs from
+# /var/log/run.log. Trap EXIT and hold for ~5m on any non-zero exit so there is
+# a grace window to exec into the still-alive container and read what went wrong
+# (tee keeps appending the log throughout the hold). The intentional shutdown at
+# the end of the script exits 0, so this only triggers on real failures.
+hold_for_logs() {
+    local rc=$?
+    if [[ "$rc" != "0" ]]; then
+        echo "[run.sh] Failed early (exit ${rc}); holding ~5m so you can collect logs..."
+        sleep 300
+        echo "[run.sh] Grace period over; exiting with status ${rc}"
+    fi
+}
+trap 'hold_for_logs' EXIT
+
 # Tee combined output to the log file AND the container's stdout/stderr.
 # The file keeps the persistent debug log (tailable over SSH); the fd pass-through
 # lets `podman logs` and attached runs show the same output live.
