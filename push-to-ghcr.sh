@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -euo pipefile
+set -euo pipefail
 
 # if you need to login first use
 # podman login ghcr.io
