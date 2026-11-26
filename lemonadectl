@@ -85,7 +85,7 @@ declare -A MODEL_CTX_SIZE=(
     ["qwen|small"]=110000
     ["qwen|large"]=128000
     ["ornith|small"]=128000
-    ["ornith|large"]=128000
+    ["ornith|large"]=200000
 )
 
 # ---------------------------------------------------------------------------
